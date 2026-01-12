@@ -1,5 +1,6 @@
 # src/infer_sklearn.py
 import monitoring
+import drift
 
 import os
 import mlflow
@@ -109,7 +110,7 @@ def main():
     # Write predictions to UC
     write_predictions_to_uc(out, output_table)
     print(f"Wrote predictions to UC table: {output_table}")
-    
+
     monitoring_table = os.getenv("MONITOR_TABLE", "main.default.black_friday_monitoring")
 
     monitoring.log_monitoring_row(
@@ -119,6 +120,19 @@ def main():
         pred_table=output_table,
     )
     print(f"Appended monitoring row to: {monitoring_table}")
+
+    baseline_mode = os.getenv("DRIFT_BASELINE_MODE", "first")  # first | previous
+    max_mean = float(os.getenv("MAX_MEAN_PCT_CHANGE", "0.15"))
+    max_std = float(os.getenv("MAX_STD_PCT_CHANGE", "0.25"))
+
+    report = drift.drift_check_mean_std(
+        monitoring_table,
+        baseline_mode=baseline_mode,
+        max_mean_pct_change=max_mean,
+        max_std_pct_change=max_std,
+    )
+
+    print("Drift check report:", report)
 
     print("Preview rows:")
     print(out.head(5))

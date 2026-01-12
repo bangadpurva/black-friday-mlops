@@ -16,6 +16,9 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.ensemble import HistGradientBoostingRegressor  # strong + compact
 
+from mlflow.models.signature import infer_signature
+from mlflow import register_model
+
 spark = SparkSession.builder.getOrCreate()
 
 LABEL_COL = "Purchase"
@@ -122,12 +125,21 @@ def main():
         input_example = X_train.head(5)
         pred_example = pipe.predict(input_example)
 
+        signature = infer_signature(X_train, pipe.predict(X_train.head(50)))
+
         mlflow.sklearn.log_model(
             pipe,
             artifact_path="model",
-            input_example=input_example,
+            input_example=X_train.head(5),
+            signature=signature
         )
 
+        registered_name = "main.default.black_friday_purchase_model"  # change catalog/schema if needed
+        run_id = mlflow.active_run().info.run_id
+        model_uri = f"runs:/{run_id}/model"
+
+        register_model(model_uri, registered_name)
+        print("Registered:", registered_name)
 
         print(f"Done. MSE={mse:.4f}, R2={r2:.4f}")
 
