@@ -6,6 +6,8 @@ from pyspark.ml import Pipeline
 from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler, Imputer
 from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml.regression import GBTRegressor
+
 import mlflow
 import mlflow.spark
 
@@ -65,13 +67,23 @@ def build_pipeline(label_col: str = "Purchase"):
         outputCol="features",
     )
 
-    rf = RandomForestRegressor(
+    # rf = RandomForestRegressor(
+    #     labelCol=label_col,
+    #     featuresCol="features",
+    #     numTrees=int(os.getenv("NUM_TREES", "200")),
+    #     maxDepth=int(os.getenv("MAX_DEPTH", "12")),
+    #     seed=42,
+    # )
+    gbt = GBTRegressor(
         labelCol=label_col,
         featuresCol="features",
-        numTrees=int(os.getenv("NUM_TREES", "200")),
-        maxDepth=int(os.getenv("MAX_DEPTH", "12")),
+        maxIter=int(os.getenv("MAX_ITER", "50")),   # number of boosting iterations
+        maxDepth=int(os.getenv("MAX_DEPTH", "5")),  # keep small for serverless
+        stepSize=float(os.getenv("STEP_SIZE", "0.1")),
         seed=42,
     )
+
+return Pipeline(stages=indexers + encoders + [imputer, assembler, gbt])
 
     return Pipeline(stages=indexers + encoders + [imputer, assembler, rf])
 
@@ -107,12 +119,16 @@ def main():
             labelCol="Purchase", predictionCol="prediction", metricName="mae"
         ).evaluate(preds)
 
-        mlflow.log_param("model_type", "RandomForestRegressor")
-        mlflow.log_param("num_trees", int(os.getenv("NUM_TREES", "200")))
-        mlflow.log_param("max_depth", int(os.getenv("MAX_DEPTH", "12")))
-        mlflow.log_metric("rmse", rmse)
-        mlflow.log_metric("mae", mae)
-        mlflow.log_metric("r2", r2)
+        # mlflow.log_param("model_type", "RandomForestRegressor")
+        # mlflow.log_param("num_trees", int(os.getenv("NUM_TREES", "200")))
+        # mlflow.log_param("max_depth", int(os.getenv("MAX_DEPTH", "12")))
+        # mlflow.log_metric("rmse", rmse)
+        # mlflow.log_metric("mae", mae)
+        # mlflow.log_metric("r2", r2)
+        mlflow.log_param("model_type", "GBTRegressor")
+        mlflow.log_param("max_iter", int(os.getenv("MAX_ITER", "50")))
+        mlflow.log_param("max_depth", int(os.getenv("MAX_DEPTH", "5")))
+        mlflow.log_param("step_size", float(os.getenv("STEP_SIZE", "0.1")))
 
         mlflow.spark.log_model(model, artifact_path="model")
 
