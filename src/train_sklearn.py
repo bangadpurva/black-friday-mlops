@@ -111,12 +111,23 @@ def main():
         preds = pipe.predict(X_val)
 
         mse = mean_squared_error(y_val, preds)
+        rmse = mse ** 0.5
         r2 = r2_score(y_val, preds)
 
         mlflow.log_metric("mse", mse)
+        mlflow.log_metric("rmse", rmse)
         mlflow.log_metric("r2", r2)
 
-        mlflow.sklearn.log_model(pipe, artifact_path="model")
+        # Add signature + input example (best practice)
+        input_example = X_train.head(5)
+        pred_example = pipe.predict(input_example)
+
+        mlflow.sklearn.log_model(
+            pipe,
+            artifact_path="model",
+            input_example=input_example,
+        )
+
 
         print(f"Done. MSE={mse:.4f}, R2={r2:.4f}")
 
