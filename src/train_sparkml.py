@@ -9,6 +9,7 @@ from pyspark.ml.evaluation import RegressionEvaluator
 import mlflow
 import mlflow.spark
 
+spark = SparkSession.builder.getOrCreate()
 
 def load_and_clean(table_name: str):
     df = spark.table(table_name)
