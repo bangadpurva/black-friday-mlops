@@ -1,91 +1,91 @@
 # src/train_sparkml.py
+
 import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import expr
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler, Imputer
-from pyspark.ml.regression import RandomForestRegressor
+from pyspark.ml.regression import LinearRegression
 from pyspark.ml.evaluation import RegressionEvaluator
-from pyspark.ml.regression import GBTRegressor
-
 import mlflow
 import mlflow.spark
 
+# ✅ REQUIRED in scripts (notebooks create this automatically)
 spark = SparkSession.builder.getOrCreate()
 
+LABEL_COL = "Purchase"
+
+CATEGORICAL_COLS = ["Gender", "Age", "City_Category", "Stay_In_Current_City_Years"]
+NUMERIC_COLS = [
+    "Occupation",
+    "Marital_Status",
+    "Product_Category_1",
+    "Product_Category_2",
+    "Product_Category_3",
+]
+
+REQUIRED_COLS = CATEGORICAL_COLS + NUMERIC_COLS + [LABEL_COL]
+
+
 def load_and_clean(table_name: str):
+    """
+    Loads a UC table and:
+    - safely casts numeric columns using try_cast (handles 'null' strings)
+    - selects ONLY the required columns to prevent high-cardinality leakage (e.g., Product_ID)
+    """
     df = spark.table(table_name)
 
     # Safely cast numeric columns (handles "null" strings by returning NULL)
-    numeric_like = [
-        "Occupation",
-        "Marital_Status",
-        "Product_Category_1",
-        "Product_Category_2",
-        "Product_Category_3",
-        "Purchase",
-    ]
-    for c in numeric_like:
+    for c in NUMERIC_COLS + [LABEL_COL]:
         if c in df.columns:
             df = df.withColumn(c, expr(f"try_cast({c} as double)"))
 
-    # Drop IDs (optional, but usually improves generalization)
-    for c in ["User_ID", "Product_ID"]:
-        if c in df.columns:
-            df = df.drop(c)
+    # HARD SELECT: prevents User_ID/Product_ID or any other extra columns from entering pipeline
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in {table_name}: {missing}")
 
+    df = df.select(*REQUIRED_COLS)
     return df
 
 
-def build_pipeline(label_col: str = "Purchase"):
-    categorical_cols = ["Gender", "Age", "City_Category", "Stay_In_Current_City_Years"]
-    numeric_cols = [
-        "Occupation",
-        "Marital_Status",
-        "Product_Category_1",
-        "Product_Category_2",
-        "Product_Category_3",
-    ]
-
+def build_pipeline(label_col: str = LABEL_COL):
+    """
+    Builds a compact, Spark-Connect-friendly pipeline:
+    - StringIndexer + OneHotEncoder for categorical columns
+    - Imputer for numeric columns
+    - VectorAssembler
+    - LinearRegression (small model artifact, safe for serverless)
+    """
     indexers = [
         StringIndexer(inputCol=c, outputCol=f"{c}_idx", handleInvalid="keep")
-        for c in categorical_cols
+        for c in CATEGORICAL_COLS
     ]
+
     encoders = [
         OneHotEncoder(inputCol=f"{c}_idx", outputCol=f"{c}_ohe")
-        for c in categorical_cols
+        for c in CATEGORICAL_COLS
     ]
 
     imputer = Imputer(
-        inputCols=numeric_cols,
-        outputCols=[f"{c}_imp" for c in numeric_cols],
+        inputCols=NUMERIC_COLS,
+        outputCols=[f"{c}_imp" for c in NUMERIC_COLS],
     )
 
     assembler = VectorAssembler(
-        inputCols=[f"{c}_ohe" for c in categorical_cols]
-        + [f"{c}_imp" for c in numeric_cols],
+        inputCols=[f"{c}_ohe" for c in CATEGORICAL_COLS] + [f"{c}_imp" for c in NUMERIC_COLS],
         outputCol="features",
     )
 
-    # rf = RandomForestRegressor(
-    #     labelCol=label_col,
-    #     featuresCol="features",
-    #     numTrees=int(os.getenv("NUM_TREES", "200")),
-    #     maxDepth=int(os.getenv("MAX_DEPTH", "12")),
-    #     seed=42,
-    # )
-    gbt = GBTRegressor(
+    lr = LinearRegression(
         labelCol=label_col,
         featuresCol="features",
-        maxIter=int(os.getenv("MAX_ITER", "50")),   # number of boosting iterations
-        maxDepth=int(os.getenv("MAX_DEPTH", "5")),  # keep small for serverless
-        stepSize=float(os.getenv("STEP_SIZE", "0.1")),
-        seed=42,
+        regParam=float(os.getenv("REG_PARAM", "0.1")),
+        elasticNetParam=float(os.getenv("ELASTIC_NET", "0.0")),  # 0=ridge, 1=lasso
+        maxIter=int(os.getenv("MAX_ITER", "50")),
     )
 
-return Pipeline(stages=indexers + encoders + [imputer, assembler, gbt])
-
-    return Pipeline(stages=indexers + encoders + [imputer, assembler, rf])
+    return Pipeline(stages=indexers + encoders + [imputer, assembler, lr])
 
 
 def main():
@@ -95,40 +95,39 @@ def main():
     model_name = os.getenv("REGISTERED_MODEL", "main.default.black_friday_purchase_model")
 
     # Required for serverless/shared clusters: point MLflow temp dir to UC Volume
-    # Create volume first: main.default.mlflow_tmp
+    # Create volume once: CREATE VOLUME IF NOT EXISTS main.default.mlflow_tmp;
     os.environ.setdefault("MLFLOW_DFS_TMP", "/Volumes/main/default/mlflow_tmp")
 
     mlflow.set_experiment(experiment_name)
 
     df = load_and_clean(train_table)
+    print("Training columns:", df.columns)
+
     train_df, val_df = df.randomSplit([0.8, 0.2], seed=42)
 
-    pipeline = build_pipeline(label_col="Purchase")
+    pipeline = build_pipeline(label_col=LABEL_COL)
 
     with mlflow.start_run():
         model = pipeline.fit(train_df)
         preds = model.transform(val_df)
 
         rmse = RegressionEvaluator(
-            labelCol="Purchase", predictionCol="prediction", metricName="rmse"
+            labelCol=LABEL_COL, predictionCol="prediction", metricName="rmse"
         ).evaluate(preds)
         r2 = RegressionEvaluator(
-            labelCol="Purchase", predictionCol="prediction", metricName="r2"
+            labelCol=LABEL_COL, predictionCol="prediction", metricName="r2"
         ).evaluate(preds)
         mae = RegressionEvaluator(
-            labelCol="Purchase", predictionCol="prediction", metricName="mae"
+            labelCol=LABEL_COL, predictionCol="prediction", metricName="mae"
         ).evaluate(preds)
 
-        # mlflow.log_param("model_type", "RandomForestRegressor")
-        # mlflow.log_param("num_trees", int(os.getenv("NUM_TREES", "200")))
-        # mlflow.log_param("max_depth", int(os.getenv("MAX_DEPTH", "12")))
-        # mlflow.log_metric("rmse", rmse)
-        # mlflow.log_metric("mae", mae)
-        # mlflow.log_metric("r2", r2)
-        mlflow.log_param("model_type", "GBTRegressor")
+        mlflow.log_param("model_type", "LinearRegression")
+        mlflow.log_param("reg_param", float(os.getenv("REG_PARAM", "0.1")))
+        mlflow.log_param("elastic_net", float(os.getenv("ELASTIC_NET", "0.0")))
         mlflow.log_param("max_iter", int(os.getenv("MAX_ITER", "50")))
-        mlflow.log_param("max_depth", int(os.getenv("MAX_DEPTH", "5")))
-        mlflow.log_param("step_size", float(os.getenv("STEP_SIZE", "0.1")))
+        mlflow.log_metric("rmse", rmse)
+        mlflow.log_metric("mae", mae)
+        mlflow.log_metric("r2", r2)
 
         mlflow.spark.log_model(model, artifact_path="model")
 
