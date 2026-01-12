@@ -4,7 +4,7 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import expr
 from pyspark.ml import Pipeline
-from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler, Imputer
+from pyspark.ml.feature import FeatureHasher, VectorAssembler, Imputer
 from pyspark.ml.regression import LinearRegression
 from pyspark.ml.evaluation import RegressionEvaluator
 import mlflow
@@ -51,29 +51,28 @@ def load_and_clean(table_name: str):
 
 def build_pipeline(label_col: str = LABEL_COL):
     """
-    Builds a compact, Spark-Connect-friendly pipeline:
-    - StringIndexer + OneHotEncoder for categorical columns
+    Spark-Connect-friendly pipeline:
     - Imputer for numeric columns
-    - VectorAssembler
-    - LinearRegression (small model artifact, safe for serverless)
+    - FeatureHasher for categoricals (NO label dictionary stored -> small model)
+    - VectorAssembler to combine hashed + numeric
+    - LinearRegression
     """
-    indexers = [
-        StringIndexer(inputCol=c, outputCol=f"{c}_idx", handleInvalid="keep")
-        for c in CATEGORICAL_COLS
-    ]
-
-    encoders = [
-        OneHotEncoder(inputCol=f"{c}_idx", outputCol=f"{c}_ohe")
-        for c in CATEGORICAL_COLS
-    ]
-
     imputer = Imputer(
         inputCols=NUMERIC_COLS,
         outputCols=[f"{c}_imp" for c in NUMERIC_COLS],
     )
 
+    # Hash categorical columns into a fixed-size feature vector
+    # Increase HASH_DIM if you want fewer collisions (2^18 is a good default)
+    hash_dim = int(os.getenv("HASH_DIM", str(2**18)))  # 262,144
+    hasher = FeatureHasher(
+        inputCols=CATEGORICAL_COLS,
+        outputCol="cat_hashed",
+        numFeatures=hash_dim,
+    )
+
     assembler = VectorAssembler(
-        inputCols=[f"{c}_ohe" for c in CATEGORICAL_COLS] + [f"{c}_imp" for c in NUMERIC_COLS],
+        inputCols=["cat_hashed"] + [f"{c}_imp" for c in NUMERIC_COLS],
         outputCol="features",
     )
 
@@ -85,7 +84,7 @@ def build_pipeline(label_col: str = LABEL_COL):
         maxIter=int(os.getenv("MAX_ITER", "50")),
     )
 
-    return Pipeline(stages=indexers + encoders + [imputer, assembler, lr])
+    return Pipeline(stages=[imputer, hasher, assembler, lr])
 
 
 def main():
@@ -121,7 +120,8 @@ def main():
             labelCol=LABEL_COL, predictionCol="prediction", metricName="mae"
         ).evaluate(preds)
 
-        mlflow.log_param("model_type", "LinearRegression")
+        mlflow.log_param("model_type", "LinearRegression+FeatureHasher")
+        mlflow.log_param("hash_dim", int(os.getenv("HASH_DIM", str(2**18))))
         mlflow.log_param("reg_param", float(os.getenv("REG_PARAM", "0.1")))
         mlflow.log_param("elastic_net", float(os.getenv("ELASTIC_NET", "0.0")))
         mlflow.log_param("max_iter", int(os.getenv("MAX_ITER", "50")))
@@ -129,12 +129,13 @@ def main():
         mlflow.log_metric("mae", mae)
         mlflow.log_metric("r2", r2)
 
+        # Log model (should be Spark-Connect-safe now)
         mlflow.spark.log_model(model, artifact_path="model")
 
         run_id = mlflow.active_run().info.run_id
         model_uri = f"runs:/{run_id}/model"
 
-        # Register to UC Model Registry (if enabled in your workspace)
+        # Register to UC Model Registry (if enabled)
         try:
             mlflow.register_model(model_uri, model_name)
             print(f"Registered model to: {model_name}")
