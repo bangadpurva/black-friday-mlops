@@ -1,4 +1,5 @@
 # src/infer_sklearn.py
+import monitoring
 
 import os
 import mlflow
@@ -108,6 +109,17 @@ def main():
     # Write predictions to UC
     write_predictions_to_uc(out, output_table)
     print(f"Wrote predictions to UC table: {output_table}")
+    
+    monitoring_table = os.getenv("MONITOR_TABLE", "main.default.black_friday_monitoring")
+
+    monitoring.log_monitoring_row(
+        monitoring_table,
+        mlflow_run_id=run_id,
+        test_table=test_table,
+        pred_table=output_table,
+    )
+    print(f"Appended monitoring row to: {monitoring_table}")
+
     print("Preview rows:")
     print(out.head(5))
 
